@@ -20,6 +20,7 @@ BATCH_SIZE = 50
 NUM_BATCHES = 1000
 NUM_EPOCH = 3
 BITS = 5
+MAX_SPAN = 2 ** BITS
 LEARNING_RATE = 0.001
 
 
@@ -63,12 +64,12 @@ def prune_weights(weight):
         # compute threshold
         threshold = tmp[int(tmp.shape[0] * COMPRESSION_RATE)]
         weight[..., i][np.abs(weight[..., i]) < threshold] = 0
-    sparse_layer = deepcopy(weight)
-    sparse_layer[sparse_layer != 0] = 1
-    return weight, sparse_layer
+    sparse_matrix = deepcopy(weight)
+    sparse_matrix[sparse_matrix != 0] = 1
+    return weight, sparse_matrix
 
 
-Sparse = {}
+Sparse_layer = {}
 
 # Pruning
 for layer_id in range(len(model.layers)):
@@ -79,8 +80,8 @@ for layer_id in range(len(model.layers)):
     if len(weight) > 0:
         if layer_id != 0:
             w = deepcopy(weight)
-            new_weight, sparse_layer = prune_weights(w[0])
-            Sparse[layer_id] = sparse_layer
+            new_weight, sparse_matrix = prune_weights(w[0])
+            Sparse_layer[layer_id] = sparse_matrix
             w[0] = new_weight
             layer.set_weights(w)
 
@@ -100,9 +101,9 @@ for epoch in range(NUM_EPOCH):
         # train on each batch
         model.train_on_batch(X, Y)
         # apply Sparse connection
-        for layer_id in Sparse:
+        for layer_id in Sparse_layer:
             w = model.layers[layer_id].get_weights()
-            w[0] = w[0] * Sparse[layer_id]
+            w[0] = w[0] * Sparse_layer[layer_id]
             model.layers[layer_id].set_weights(w)
     score = model.evaluate(x_test, y_test, verbose=0)
     print('val loss: {}'.format(score[0]))
@@ -117,18 +118,22 @@ cluster_centroids = dict()
 
 
 # Weight Share and Quantization
-for layer_id in Sparse:
+for layer_id in Sparse_layer:
     layer = model.layers[layer_id]
     weight = layer.get_weights()
     w = deepcopy(weight)
     shape = w[0].shape
+
     weight_array = w[0].flatten()
-    max_weight = max(weight_array)
-    min_weight = min(weight_array)
+    nonzero_weight = w[0][Sparse_layer[layer_id] != 0].flatten()
+    nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
+
+    max_weight = max(nonzero_weight)
+    min_weight = min(nonzero_weight)
     space = np.linspace(min_weight, max_weight, num=2 ** BITS)
     kmeans = KMeans(n_clusters=len(space), init=space.reshape(-1, 1), n_init=1, precompute_distances=True,
                     algorithm="full")
-    kmeans.fit(weight_array.reshape(-1, 1))
+    kmeans.fit(nonzero_weight.reshape(-1, 1))
     # cluster index of each weight
     layer_cluster_index = kmeans.labels_
     # value of the centroids
@@ -136,10 +141,19 @@ for layer_id in Sparse:
     # Add to dict
     cluster_index[layer_id] = layer_cluster_index
     cluster_centroids[layer_id] = layer_centroids
+
     # set new weight
-    new_weight = kmeans.cluster_centers_[kmeans.labels_].reshape(shape)
-    w[0] = new_weight
+    new_weight = kmeans.cluster_centers_[kmeans.labels_].flatten()
+    for idx in range(len(nonzero_index)):
+        index = nonzero_index[idx]
+        weight_array[index] = new_weight[idx]
+    # new_weight = kmeans.cluster_centers_[kmeans.labels_].reshape(shape)
+    # w[0] = new_weight
+    w[0] = weight_array.reshape(shape)
     layer.set_weights(w)
+
+score = model.evaluate(x_test, y_test, verbose=0)
+print(score[1])
 
 
 # calculate gradient and get the fine-tuned centroids
@@ -155,11 +169,19 @@ for epoch in range(NUM_EPOCH):
             y_predict = model(X)
             loss = tf.losses.softmax_cross_entropy(onehot_labels=Y, logits=y_predict)
         grads = tape.gradient(loss, model.variables)
-        for layer_id in Sparse:
-            gradient = grads[layer_id].numpy().flatten()
+        gradient_num = 0
+        for layer_id in Sparse_layer:
+            gradient_num += 2
+            gradient = grads[gradient_num].numpy().flatten()
+
+            # Get the gradient of the nonzero position
+            nonzero_gradient = gradient[Sparse_layer[layer_id].flatten() != 0].flatten()
+            nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
+            # print(len(nonzero_gradient))
+
             gradient_index = np.zeros(2 ** BITS)
             # Calculate the sum of gradient of the same cluster
-            for i in range(len(gradient)):
+            for i in range(len(nonzero_gradient)):
                 gradient_index[cluster_index[layer_id][i]] += gradient[i]
             # Update centroid
             fine_tuned_centroids = cluster_centroids[layer_id]-LEARNING_RATE*gradient_index
@@ -167,8 +189,13 @@ for epoch in range(NUM_EPOCH):
 
             w = model.layers[layer_id].get_weights()
             shape = w[0].shape
-            new_weight = fine_tuned_centroids[cluster_index[layer_id]].reshape(shape)
-            w[0] = new_weight
+            weight_array = w[0].flatten()
+            new_weight = fine_tuned_centroids[cluster_index[layer_id]]
+            for idx in range(len(nonzero_index)):
+                index = nonzero_index[idx]
+                weight_array[index] = new_weight[idx]
+
+            w[0] = weight_array.reshape(shape)
             model.layers[layer_id].set_weights(w)
     score = model.evaluate(x_test, y_test, verbose=0)
     print('val loss: {}'.format(score[0]))
@@ -178,3 +205,39 @@ for epoch in range(NUM_EPOCH):
 print('-------------------')
 score = model.evaluate(x_test, y_test, verbose=0)
 print(score[1])
+
+
+# Matrix sparsity with relative index
+for layer_id in Sparse_layer:
+    layer = model.layers[layer_id]
+    weight = layer.get_weights()
+    w = deepcopy(weight)
+    shape = w[0].shape
+
+    weight_array = w[0].flatten()
+    nonzero_weight = w[0][Sparse_layer[layer_id] != 0].flatten()
+    nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
+
+    first = nonzero_index[0]
+
+    relative = np.insert(np.diff(nonzero_index), 0, first)
+
+    relative_diff_index = relative.tolist()
+
+    weight_value = nonzero_weight.tolist()
+
+    shift = 0
+    for i in np.where(relative > MAX_SPAN)[0].tolist():
+        while relative_diff_index[i + shift] > MAX_SPAN:
+            relative_diff_index.insert(i + shift, MAX_SPAN)
+            weight_value.insert(i + shift, 0)
+            shift += 1
+            relative_diff_index[i + shift] -= MAX_SPAN
+
+    print(relative_diff_index)
+    # print(weight_value)
+    print('----------------')
+
+
+
+
