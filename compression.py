@@ -3,6 +3,7 @@ from sklearn.cluster import KMeans
 import tensorflow.keras as keras
 from copy import deepcopy
 import numpy as np
+import h5py
 tf.enable_eager_execution()
 
 mnist = tf.keras.datasets.mnist
@@ -207,6 +208,9 @@ score = model.evaluate(x_test, y_test, verbose=0)
 print(score[1])
 
 
+layer_relative_index = dict()
+layer_weight_cluster_index = dict()
+
 # Matrix sparsity with relative index
 for layer_id in Sparse_layer:
     layer = model.layers[layer_id]
@@ -215,7 +219,10 @@ for layer_id in Sparse_layer:
     shape = w[0].shape
 
     weight_array = w[0].flatten()
-    nonzero_weight = w[0][Sparse_layer[layer_id] != 0].flatten()
+    # nonzero_weight = w[0][Sparse_layer[layer_id] != 0].flatten()
+    # print(len(nonzero_weight))
+    nonzero_weight_cluster_index = cluster_index[layer_id]
+    print(len(nonzero_weight_cluster_index))
     nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
 
     first = nonzero_index[0]
@@ -224,20 +231,50 @@ for layer_id in Sparse_layer:
 
     relative_diff_index = relative.tolist()
 
-    weight_value = nonzero_weight.tolist()
+    weight_cluster_index = nonzero_weight_cluster_index.tolist()
 
     shift = 0
     for i in np.where(relative > MAX_SPAN)[0].tolist():
         while relative_diff_index[i + shift] > MAX_SPAN:
             relative_diff_index.insert(i + shift, MAX_SPAN)
-            weight_value.insert(i + shift, 0)
+            weight_cluster_index.insert(i + shift, 0)
             shift += 1
             relative_diff_index[i + shift] -= MAX_SPAN
 
-    print(relative_diff_index)
-    # print(weight_value)
+    layer_relative_index[layer_id] = np.array(relative_diff_index)
+    layer_weight_cluster_index[layer_id] = np.array(weight_cluster_index)
     print('----------------')
 
+# print(layer_weight_value[5])
+
+# encode
+file_name = './result/compressed_model'
+file = h5py.File('{}.h5'.format(file_name), mode='w')
+
+for layer_id in range(len(model.layers)):
+    layer = model.layers[layer_id]
+    weight = layer.get_weights()
+    if len(weight) > 0:
+        file_layer = file.create_group(layer.name)
+        shape = weight[0].shape
+        if layer_id != 0:
+            print(len(weight[0].shape))
+            pshape = file_layer.create_dataset('shape', np.array(shape).shape, dtype='int32')
+            pindex = file_layer.create_dataset('index', layer_relative_index[layer_id].shape, dtype='int32')
+            pcluster_index = file_layer.create_dataset('cluster_index', layer_weight_cluster_index[layer_id].shape, dtype='int32')
+            pcentroid = file_layer.create_dataset('centroid', cluster_centroids[layer_id].shape, dtype='float32')
+            pshape[:] = np.array(shape)
+            pindex[:] = layer_relative_index[layer_id]
+            pcluster_index[:] = layer_weight_cluster_index[layer_id]
+            pcentroid[:] = cluster_centroids[layer_id]
+        else:
+            pweight = file_layer.create_dataset('weight', weight[0].shape, dtype='float32')
+            pweight[:] = weight[0]
+        pbias = file_layer.create_dataset('bias', weight[1].shape, dtype='float32')
+        pbias[:] = weight[1]
+
+file.flush()
+file.close()
 
 
 
