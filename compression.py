@@ -4,6 +4,9 @@ import tensorflow.keras as keras
 from copy import deepcopy
 import numpy as np
 import h5py
+from collections import defaultdict, namedtuple
+from heapq import heappush, heappop, heapify
+import struct
 tf.enable_eager_execution()
 
 mnist = tf.keras.datasets.mnist
@@ -19,7 +22,7 @@ print(x_test.shape)
 COMPRESSION_RATE = 0.9
 BATCH_SIZE = 50
 NUM_BATCHES = 1000
-NUM_EPOCH = 3
+NUM_EPOCH = 1
 BITS = 5
 MAX_SPAN = 2 ** BITS
 LEARNING_RATE = 0.001
@@ -158,49 +161,49 @@ print(score[1])
 
 
 # calculate gradient and get the fine-tuned centroids
-for epoch in range(NUM_EPOCH):
-    for j in range(x_train.shape[0] // BATCH_SIZE):
-        begin = j * BATCH_SIZE
-        if j * BATCH_SIZE + BATCH_SIZE > x_train.shape[0]:
-            end = x_train.shape[0]
-        else:
-            end = j * BATCH_SIZE + BATCH_SIZE
-        X, Y = x_train[begin:end], y_train[begin:end]
-        with tf.GradientTape() as tape:
-            y_predict = model(X)
-            loss = tf.losses.softmax_cross_entropy(onehot_labels=Y, logits=y_predict)
-        grads = tape.gradient(loss, model.variables)
-        gradient_num = 0
-        for layer_id in Sparse_layer:
-            gradient_num += 2
-            gradient = grads[gradient_num].numpy().flatten()
-
-            # Get the gradient of the nonzero position
-            nonzero_gradient = gradient[Sparse_layer[layer_id].flatten() != 0].flatten()
-            nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
-            # print(len(nonzero_gradient))
-
-            gradient_index = np.zeros(2 ** BITS)
-            # Calculate the sum of gradient of the same cluster
-            for i in range(len(nonzero_gradient)):
-                gradient_index[cluster_index[layer_id][i]] += gradient[i]
-            # Update centroid
-            fine_tuned_centroids = cluster_centroids[layer_id]-LEARNING_RATE*gradient_index
-            cluster_centroids[layer_id] = fine_tuned_centroids
-
-            w = model.layers[layer_id].get_weights()
-            shape = w[0].shape
-            weight_array = w[0].flatten()
-            new_weight = fine_tuned_centroids[cluster_index[layer_id]]
-            for idx in range(len(nonzero_index)):
-                index = nonzero_index[idx]
-                weight_array[index] = new_weight[idx]
-
-            w[0] = weight_array.reshape(shape)
-            model.layers[layer_id].set_weights(w)
-    score = model.evaluate(x_test, y_test, verbose=0)
-    print('val loss: {}'.format(score[0]))
-    print('val acc: {}'.format(score[1]))
+# for epoch in range(NUM_EPOCH):
+#     for j in range(x_train.shape[0] // BATCH_SIZE):
+#         begin = j * BATCH_SIZE
+#         if j * BATCH_SIZE + BATCH_SIZE > x_train.shape[0]:
+#             end = x_train.shape[0]
+#         else:
+#             end = j * BATCH_SIZE + BATCH_SIZE
+#         X, Y = x_train[begin:end], y_train[begin:end]
+#         with tf.GradientTape() as tape:
+#             y_predict = model(X)
+#             loss = tf.losses.softmax_cross_entropy(onehot_labels=Y, logits=y_predict)
+#         grads = tape.gradient(loss, model.variables)
+#         gradient_num = 0
+#         for layer_id in Sparse_layer:
+#             gradient_num += 2
+#             gradient = grads[gradient_num].numpy().flatten()
+#
+#             # Get the gradient of the nonzero position
+#             nonzero_gradient = gradient[Sparse_layer[layer_id].flatten() != 0].flatten()
+#             nonzero_index = np.where(Sparse_layer[layer_id].flatten() != 0)[0]
+#             # print(len(nonzero_gradient))
+#
+#             gradient_index = np.zeros(2 ** BITS)
+#             # Calculate the sum of gradient of the same cluster
+#             for i in range(len(nonzero_gradient)):
+#                 gradient_index[cluster_index[layer_id][i]] += gradient[i]
+#             # Update centroid
+#             fine_tuned_centroids = cluster_centroids[layer_id]-LEARNING_RATE*gradient_index
+#             cluster_centroids[layer_id] = fine_tuned_centroids
+#
+#             w = model.layers[layer_id].get_weights()
+#             shape = w[0].shape
+#             weight_array = w[0].flatten()
+#             new_weight = fine_tuned_centroids[cluster_index[layer_id]]
+#             for idx in range(len(nonzero_index)):
+#                 index = nonzero_index[idx]
+#                 weight_array[index] = new_weight[idx]
+#
+#             w[0] = weight_array.reshape(shape)
+#             model.layers[layer_id].set_weights(w)
+#     score = model.evaluate(x_test, y_test, verbose=0)
+#     print('val loss: {}'.format(score[0]))
+#     print('val acc: {}'.format(score[1]))
 
 
 print('-------------------')
@@ -210,6 +213,80 @@ print(score[1])
 
 layer_relative_index = dict()
 layer_weight_cluster_index = dict()
+
+Node = namedtuple('Node', ['frequency', 'value', 'left', 'right'])
+Node.__lt__ = lambda x, y: x.frequency < y.frequency
+
+
+def encode_huffman_tree(root):
+    """
+    Encodes a huffman tree to string of '0's and '1's
+    """
+    # converter = {'float32':float2bitstr, 'int32':int2bitstr}
+    code_list = []
+
+    def encode_node(node):
+        if node.value is not None:  # node is leaf node
+            code_list.append('1')
+            lst = list(int2bitstr(node.value))
+            code_list.extend(lst)
+        else:
+            code_list.append('0')
+            encode_node(node.left)
+            encode_node(node.right)
+
+    encode_node(root)
+    return ''.join(code_list)
+
+
+def int2bitstr(integer):
+    four_bytes = struct.pack('>I', integer)  # bytes
+    return ''.join(f'{byte:08b}' for byte in four_bytes)  # string of '0's and '1's
+
+
+def bitstr2int(bitstr):
+    byte_arr = bytearray(int(bitstr[i:i + 8], 2) for i in range(0, len(bitstr), 8))
+    return struct.unpack('>I', byte_arr)[0]
+
+
+def huffman_encode(arr):
+    # count the frequency of each number in array
+    frequency_map = defaultdict(int)
+    for value in np.nditer(arr):
+        value = int(value)
+        frequency_map[value] += 1
+
+    heap = [Node(frequency, value, None, None) for value, frequency in frequency_map.items()]
+    heapify(heap)
+
+    # Merge nodes
+    while len(heap) > 1:
+        node1 = heappop(heap)
+        node2 = heappop(heap)
+        merged = Node(node1.frequency + node2.frequency, None, node1, node2)
+        heappush(heap, merged)
+
+    # Generate code value mapping
+    value2code = dict()
+
+    def generate_code(node, code):
+        if node is None:
+            return
+        if node.value is not None:
+            value2code[node.value] = code
+            return
+        generate_code(node.left, code + '0')
+        generate_code(node.right, code + '1')
+
+    root = heappop(heap)
+    generate_code(root, '')
+
+    data_encoding = ''.join(value2code[int(value)] for value in np.nditer(arr))
+
+    codebook_encoding = encode_huffman_tree(root)
+
+    return data_encoding, codebook_encoding
+
 
 # Matrix sparsity with relative index
 for layer_id in Sparse_layer:
@@ -242,13 +319,15 @@ for layer_id in Sparse_layer:
             relative_diff_index[i + shift] -= MAX_SPAN
 
     layer_relative_index[layer_id] = np.array(relative_diff_index)
-    layer_weight_cluster_index[layer_id] = np.array(weight_cluster_index)
+    data_encoding, codebook_encoding = huffman_encode(np.array(weight_cluster_index))
+    # layer_weight_cluster_index[layer_id] = np.array(weight_cluster_index)
+    layer_weight_cluster_index[layer_id] = np.array([data_encoding, codebook_encoding])
     print('----------------')
 
 # print(layer_weight_value[5])
 
 # encode
-file_name = './result/compressed_model'
+file_name = './result/compressed_model2'
 file = h5py.File('{}.h5'.format(file_name), mode='w')
 
 for layer_id in range(len(model.layers)):
@@ -261,7 +340,11 @@ for layer_id in range(len(model.layers)):
             print(len(weight[0].shape))
             pshape = file_layer.create_dataset('shape', np.array(shape).shape, dtype='int32')
             pindex = file_layer.create_dataset('index', layer_relative_index[layer_id].shape, dtype='int32')
-            pcluster_index = file_layer.create_dataset('cluster_index', layer_weight_cluster_index[layer_id].shape, dtype='int32')
+            # pcluster_index = file_layer.create_dataset('cluster_index', layer_weight_cluster_index[layer_id].shape,
+            #                                            dtype='int32')
+            pcluster_index = file_layer.create_dataset('cluster_index', layer_weight_cluster_index[layer_id].shape,
+                                                       dtype=h5py.special_dtype(vlen=str))
+
             pcentroid = file_layer.create_dataset('centroid', cluster_centroids[layer_id].shape, dtype='float32')
             pshape[:] = np.array(shape)
             pindex[:] = layer_relative_index[layer_id]

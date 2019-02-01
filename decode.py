@@ -1,9 +1,11 @@
 import tensorflow as tf
-from sklearn.cluster import KMeans
 import tensorflow.keras as keras
 from copy import deepcopy
 import numpy as np
 import h5py
+from collections import defaultdict, namedtuple
+from heapq import heappush, heappop, heapify
+import struct
 tf.enable_eager_execution()
 
 mnist = tf.keras.datasets.mnist
@@ -40,7 +42,58 @@ model.compile(optimizer=tf.train.AdamOptimizer(learning_rate=LEARNING_RATE),
               loss='categorical_crossentropy',
               metrics=['accuracy'])
 
-file_name = './result/compressed_model.h5'
+file_name = './result/compressed_model2.h5'
+
+
+Node = namedtuple('Node', ['frequency', 'value', 'left', 'right'])
+Node.__lt__ = lambda x, y: x.frequency < y.frequency
+
+
+def bitstr2int(bitstr):
+    byte_arr = bytearray(int(bitstr[i:i + 8], 2) for i in range(0, len(bitstr), 8))
+    return struct.unpack('>I', byte_arr)[0]
+
+
+def decode_huffman_tree(code_str):
+    """
+    Decodes a string of '0's and '1's and costructs a huffman tree
+    """
+    idx = 0
+
+    def decode_node():
+        nonlocal idx
+        info = code_str[idx]
+        idx += 1
+        if info == '1':  # Leaf node
+            value = bitstr2int(code_str[idx:idx + 32])
+            idx += 32
+            return Node(0, value, None, None)
+        else:
+            left = decode_node()
+            right = decode_node()
+            return Node(0, None, left, right)
+
+    return decode_node()
+
+
+def huffman_decode(data_encoding, codebook_encoding):
+    """
+    Decodes binary files from directory
+    """
+
+    # Read the codebook
+    root = decode_huffman_tree(codebook_encoding)
+
+    # Decode
+    data = []
+    ptr = root
+    for bit in data_encoding:
+        ptr = ptr.left if bit == '0' else ptr.right
+        if ptr.value is not None:  # Leaf node
+            data.append(ptr.value)
+            ptr = root
+
+    return np.array(data, dtype=int)
 
 weights = dict()
 
@@ -53,6 +106,7 @@ for layer_name in file:
     dict_names = [n for n in group]
     if 'index' in dict_names:
         cluster_index = group['cluster_index'][()]
+        cluster_index = huffman_decode(cluster_index[0], cluster_index[1])
         index = group['index'][()]
         shape = group['shape'][()]
         centroid = group['centroid'][()]
